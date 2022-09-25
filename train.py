@@ -16,12 +16,20 @@ from module.bert import tokenizer
 from module.bert import TextCNN_Classifier
 import torch.nn as nn
 from collections import defaultdict
+from sklearn.metrics import confusion_matrix, classification_report
 from transformers import AutoConfig,AutoModel,AutoTokenizer,AdamW,get_linear_schedule_with_warmup,logging
+import argparse
+
+parser = argparse.ArgumentParser(description="Long Text Classification")
+parser.add_argument('--optim',default=False,help="choose differential learning rate or not")
+parser.add_argument('--epoch',default=20,help='num of epoches')
+parser.add_argument('--batch',default=4,help='num of batchsize')
+args = parser.parse_args()
 
 MAX_LEN = 256
-BATCH_SIZE = 4
+BATCH_SIZE = args.batch
 RANDOM_SEED = 2022
-EPOCHS = 20
+EPOCHS = args.epoch
 np.random.seed(RANDOM_SEED)
 torch.manual_seed(RANDOM_SEED)
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -45,10 +53,6 @@ model = TextCNN_Classifier()
 model = model.to(device)
 
 
-
-
-# optimizer = AdamW(model.parameters(),lr=2e-5,correct_bias=False)
-
 # 使用差分学习率
 def get_parameters(model, model_init_lr, multiplier, classifier_lr):
     parameters = []
@@ -67,8 +71,11 @@ def get_parameters(model, model_init_lr, multiplier, classifier_lr):
     }
     parameters.append(classifier_params)
     return parameters
-parameters=get_parameters(model,2e-5,0.95, 1e-4)
-optimizer = AdamW(parameters)
+if not args.optim:
+    optimizer = AdamW(model.parameters(),lr=2e-5,correct_bias=False)
+else:
+    parameters=get_parameters(model,2e-5,0.95, 1e-4)
+    optimizer = AdamW(parameters)
 
 
 total_steps = len(train_data_loader)*EPOCHS
@@ -170,3 +177,52 @@ for epoch in range(EPOCHS):
     if val_acc > best_accuracy:
         torch.save(model.state_dict(), os.path.join(MODEL_DIR,'best_model_state.ckpt'))
         best_accuracy = val_acc
+
+test_acc, _ = eval_model(
+  model,
+  test_data_loader,
+  loss_fn,
+  device,
+  len(df_test)
+)
+print(f"test result is {test_acc.item()}")
+
+def get_predictions(model, data_loader):
+    model = model.eval()
+
+    texts = []
+    predictions = []
+    prediction_probs = []
+    real_values = []
+
+    with torch.no_grad():
+        for d in data_loader:
+            texts = d["texts"]
+            input_ids = d["input_ids"].to(device)
+            attention_mask = d["attention_mask"].to(device)
+            targets = d["labels"].to(device)
+
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            )
+            _, preds = torch.max(outputs, dim=1)
+
+            probs = F.softmax(outputs, dim=1)
+
+            texts.extend(texts)
+            predictions.extend(preds)
+            prediction_probs.extend(probs)
+            real_values.extend(targets)
+
+    predictions = torch.stack(predictions).cpu()
+    prediction_probs = torch.stack(prediction_probs).cpu()
+    real_values = torch.stack(real_values).cpu()
+    return texts, predictions, prediction_probs, real_values
+
+y_texts, y_pred, y_pred_probs, y_test = get_predictions(
+  model,
+  test_data_loader
+)
+class_names = ['教育', '家居', '时尚', '时政', '科技', '房产', '财经']
+print(classification_report(y_test, y_pred, target_names=[str(label) for label in class_names]))
